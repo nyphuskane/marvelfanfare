@@ -1,0 +1,126 @@
+extends CharacterBody2D
+
+# --- ESTADÍSTICAS DEL DOOMBOT ---
+@export var max_health: float = 50.0
+var current_health: float = 50.0
+@export var speed: float = 100.0
+@export var strength: float = 15.0 # Daño que hará al jugador
+
+var target_player: CharacterBody2D = null
+
+# --- SISTEMA DE LÁSER ---
+@export var beam_dps: float = 20.0 # Daño continuo por segundo
+@export var beam_range: float = 300.0
+
+var state: String = "CHASE" # Estados: CHASE, AIMING, FIRING, COOLDOWN
+var can_shoot: bool = true
+
+@onready var ray_cast = $BeamRayCast
+@onready var beam_visuals = $BeamRayCast/BeamVisuals
+
+func _ready():
+	current_health = max_health
+
+func _physics_process(delta):
+	if target_player != null:
+		var distance_to_target = global_position.distance_to(target_player.global_position)
+		
+		# 1. ESTADO DE PERSECUCIÓN
+		if state == "CHASE":
+			# Si está cerca, inicia el ataque. Si no, camina.
+			if distance_to_target < 250 and can_shoot:
+				start_beam_attack()
+			else:
+				var direction = global_position.direction_to(target_player.global_position)
+				velocity = direction * speed
+				move_and_slide()
+				
+				# Animación (Ajusta los nombres según tus animaciones)
+				if abs(direction.x) > abs(direction.y):
+					$AnimatedSprite2D.play("walk_right" if direction.x > 0 else "walk_left")
+				else:
+					$AnimatedSprite2D.play("walk_down" if direction.y > 0 else "walk_up")
+					
+		# 2. ESTADO DE APUNTADO
+		elif state == "AIMING":
+			velocity = Vector2.ZERO # El Doombot se detiene para apuntar
+			ray_cast.look_at(target_player.global_position) # El RayCast sigue al jugador
+			
+			# Dibuja la línea delgada hasta el rango máximo
+			beam_visuals.set_point_position(0, Vector2.ZERO)
+			beam_visuals.set_point_position(1, Vector2(beam_range, 0))
+			
+		# 3. ESTADO DE DISPARO
+		elif state == "FIRING":
+			# Nota: NO llamamos a look_at() aquí, por lo que el láser se queda bloqueado
+			velocity = Vector2.ZERO
+			
+			var cast_point = Vector2(beam_range, 0)
+			ray_cast.force_raycast_update()
+			
+			if ray_cast.is_colliding():
+				# Si choca, acorta el láser visual hasta el punto de impacto
+				var collision_point = ray_cast.get_collision_point()
+				cast_point = ray_cast.to_local(collision_point)
+				
+				# Aplica daño continuo al personaje impactado
+				var collider = ray_cast.get_collider()
+				if "current_health" in collider:
+					# Restamos el daño basado en la defensa (energy_resistance) y el delta
+					var actual_damage = max(1.0, beam_dps - collider.energy_resistance)
+					collider.current_health -= actual_damage * delta
+					
+			# Actualiza el punto final del láser visual
+			beam_visuals.set_point_position(0, Vector2.ZERO)
+			beam_visuals.set_point_position(1, cast_point)
+
+
+func _on_detection_area_body_entered(body):
+	# Si lo que entró en el área tiene la variable 'is_active_player' (es un héroe)
+	if "is_active_player" in body:
+		target_player = body
+
+
+func _on_detection_area_body_exited(body):
+	# Si el objetivo sale del área, deja de perseguirlo
+	if body == target_player:
+		target_player = null
+
+func start_beam_attack():
+	can_shoot = false
+	state = "AIMING"
+	
+	# Prepara la línea visual para el modo "apuntado" (línea delgada y transparente)
+	beam_visuals.visible = true
+	beam_visuals.width = 1.0
+	beam_visuals.modulate = Color(1, 0, 0, 0.4) # Rojo semitransparente
+	
+	# Espera 2 segundos apuntando
+	await get_tree().create_timer(2.0).timeout
+	
+	# Cambia a modo disparo (bloquea la rotación)
+	if target_player != null: # Asegura que el objetivo siga existiendo
+		state = "FIRING"
+		ray_cast.enabled = true
+		beam_visuals.width = 6.0 # Hace el láser grueso
+		beam_visuals.modulate = Color(1, 0, 0, 1.0) # Rojo sólido
+		
+		# Dispara durante 1.5 segundos
+		await get_tree().create_timer(1.5).timeout
+	
+	# Apaga el láser y entra en enfriamiento
+	state = "COOLDOWN"
+	ray_cast.enabled = false
+	beam_visuals.visible = false
+	
+	await get_tree().create_timer(3.0).timeout # Espera 3 segundos antes de poder atacar de nuevo
+	can_shoot = true
+	state = "CHASE"
+
+func _input_event(viewport, event, shape_idx):
+	# Detect right mouse button
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT:
+		# Detect if it was a double click
+		if event.double_click:
+			# Call a function on all characters in the "team" group
+			get_tree().call_group("team", "force_focus_target", self)
